@@ -7,27 +7,37 @@
 #define DHT_PIN 32             // Pino digital para o DHT22
 #define PINO_RELE 25           // Pino digital para controle do relé
 #define PINO_LUZ 21            // Pino digital para luz em caso de erro
+#define PINO_RELE_FERTIL 13    // Pino para o controle do relé de irrigação da fértil
 
 // Inicializa o DHT
 DHT dht(DHT_PIN, DHT22);
 
+// Tempo de ativação da bomba de agua antes e depois da fertil
+int tempoAntesPos = 5000;  // 5 segundo
+
 // Valores de calibração
-int valorMinimo = 4095;    // Valor quando o sensor está no ar (solo seco)
-int valorMaximo = 854;     // Valor quando o sensor está completamente na água (solo muito úmido)
+int valorMinimo = 4050;    // Valor quando o sensor está no ar (solo seco)
+int valorMaximo = 500;     // Valor quando o sensor está completamente na água (solo muito úmido)
 
 // Variáveis de tempo
 unsigned long tempoUltimaLeitura = 0;
 unsigned long tempoUltimaIrrigacao = 0;
 unsigned long tempoUltimaAtualizacaoRele = 0;
-const unsigned long intervaloLeitura = 900000;  // 15 minutos (900000 ms)
-const unsigned long intervaloIrrigacao = 1000;  // 1 segundo para verificação da irrigação
+unsigned long tempoUltimaVerificacaoFertil = 0;
+unsigned long tempoReinicio = 0;
+const unsigned long intervaloLeitura = 5000;      // 15 minutos (900000 ms)
+const unsigned long intervaloIrrigacao = 1000;      // 1 segundo para verificação da irrigação
+const unsigned long intervaloVerificacaoFertil = 10000; // 30 minutos (1800000 ms)
+const unsigned long intervaloReinicio = 2400000;    // 40 minutos (2400000 ms)
 
 // Dados de autenticação e conexão
-const char* ssid = "-----";
-const char* password = "-----";
-const String serverDataURL = "https://-----/collect-data/";
-const String serverStateURL = "https://-----/collect-solenoid-state/";
-const String authKey = "-----"; // Key de autenticação
+const char* ssid = "----";
+const char* password = "----";
+const String serverDataURL = "http://----/collect-data/";
+const String serverStateURL = "http://----/collect-solenoid-state/";
+const String serverFertilStateURL = "http://----/data-fertil_state/";
+const String serverHistoricoURL = "http://----/historico-fertil/";
+const String authKey = "----"; // Key de autenticação
 
 // Variável para armazenar o estado do relé
 bool estadoRele = false;
@@ -41,6 +51,9 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
     Serial.println("Conectando ao WiFi...");
+    digitalWrite(PINO_LUZ, HIGH);
+    delay(1000);
+    digitalWrite(PINO_LUZ, LOW);
   }
   Serial.println("Conectado ao WiFi");
 
@@ -49,6 +62,7 @@ void setup() {
   pinMode(SENSOR_2_PIN, INPUT);
   pinMode(PINO_RELE, OUTPUT);
   pinMode(PINO_LUZ, OUTPUT);
+  pinMode(PINO_RELE_FERTIL, OUTPUT);
 
   // Inicializa o DHT
   dht.begin();
@@ -56,6 +70,10 @@ void setup() {
   // Inicialmente, desliga o relé e a luz de erro
   digitalWrite(PINO_RELE, LOW);
   digitalWrite(PINO_LUZ, LOW);
+  digitalWrite(PINO_RELE_FERTIL, LOW);
+
+  // Inicializa o tempo para reinício
+  tempoReinicio = millis();
 }
 
 void loop() {
@@ -71,10 +89,22 @@ void loop() {
     controlarIrrigacao();
   }
 
+  // Verifica a irrigação da fértil a cada 30 minutos
+  if (millis() - tempoUltimaVerificacaoFertil >= intervaloVerificacaoFertil) {
+    tempoUltimaVerificacaoFertil = millis();
+    verificarFertil();
+  }
+
   // Verifica se o estado do relé mudou e envia a atualização
   if (estadoRele != ultimoEstadoRele) {
     ultimoEstadoRele = estadoRele;
     enviarEstadoRele(estadoRele);
+  }
+
+  // Reinicia a ESP a cada 40 minutos para evitar travamentos
+  if (millis() - tempoReinicio >= intervaloReinicio) {
+    Serial.println("Reiniciando ESP para evitar travamentos...");
+    ESP.restart();
   }
 }
 
@@ -129,6 +159,74 @@ void controlarIrrigacao() {
   }
 }
 
+void verificarFertil() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverFertilStateURL);
+    http.addHeader("Authorization", authKey);
+    
+    int httpResponseCode = http.GET();
+    if (httpResponseCode == 200) {
+      String response = http.getString();
+      // Verifica se a irrigação fértil deve ser iniciada
+      if (response.indexOf("\"start_fertil\":true") != -1) {
+        // Extrai o tempo de irrigação do JSON
+        int tempoIrrigacao = 0;
+        int timeStartIndex = response.indexOf("\"time_ferti_ms\":") + 17; // 17 é o comprimento do string `"time_ferti_ms":`
+        if (timeStartIndex != -1) {
+          int timeEndIndex = response.indexOf(",", timeStartIndex);
+          String timeString = response.substring(timeStartIndex, timeEndIndex);
+          tempoIrrigacao = timeString.toInt(); // Converte a string para int
+        }
+
+        // Ligar o PINO_RELE um tempo antes da irrigação
+         // Tempo em milissegundos antes da irrigação
+        digitalWrite(PINO_RELE, HIGH);
+        enviarEstadoRele(true); // Envia true para o estado do relé antes da irrigação
+        delay(tempoAntesPos); // Atraso antes de iniciar a irrigação
+        
+        // Inicia a irrigação
+        Serial.println("Iniciando irrigação da fértil...");
+        enviarHistoricoFertil();
+        digitalWrite(PINO_RELE_FERTIL, HIGH);
+        
+        delay(tempoIrrigacao); // Espera durante a irrigação
+        
+        // Desliga a irrigação
+        digitalWrite(PINO_RELE_FERTIL, LOW);
+        
+        // Desliga o PINO_RELE
+        delay(tempoAntesPos); // Atraso após a irrigação
+        digitalWrite(PINO_RELE, LOW);
+        enviarEstadoRele(false); // Envia false para o estado do relé após a irrigação
+        Serial.println("Irrigação da fértil finalizada.");
+      }
+    } else {
+      Serial.println("Falha ao verificar estado da fértil.");
+    }
+    http.end();
+  }
+}
+
+void enviarHistoricoFertil() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverHistoricoURL);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", authKey);
+
+    String jsonData = "{\"data_fertil\":\"true\"}";
+
+    int httpResponseCode = http.POST(jsonData);
+    if (httpResponseCode > 0) {
+      Serial.println("Histórico de irrigação enviado com sucesso.");
+    } else {
+      Serial.println("Falha ao enviar histórico de irrigação.");
+    }
+    http.end();
+  }
+}
+
 void enviarDados(float temperatura, float umidadeAr, float umidadeSolo) {
   if (WiFi.status() == WL_CONNECTED) { // Verifica se está conectado ao WiFi
     HTTPClient http;
@@ -148,7 +246,7 @@ void enviarDados(float temperatura, float umidadeAr, float umidadeSolo) {
     int httpResponseCode = http.POST(jsonData);
     if (httpResponseCode > 0) {
       String response = http.getString();
-      Serial.println("Dados enviados com sucesso: " + response);
+      Serial.println("Dados dos sensores enviados com sucesso: " + response);
     } else {
       Serial.println("Falha ao enviar dados. Código de erro: " + String(httpResponseCode));
     }
@@ -178,7 +276,7 @@ void enviarEstadoRele(bool estado) {
     int httpResponseCode = http.POST(jsonData);
     if (httpResponseCode > 0) {
       String response = http.getString();
-      Serial.println("Estado do relé enviado com sucesso: " + response);
+      Serial.println("Estado do relé da irrigação enviado com sucesso: " + response);
     } else {
       Serial.println("Falha ao enviar estado do relé. Código de erro: " + String(httpResponseCode));
     }
