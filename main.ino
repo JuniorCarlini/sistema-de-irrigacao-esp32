@@ -25,9 +25,9 @@ unsigned long tempoUltimaIrrigacao = 0;
 unsigned long tempoUltimaAtualizacaoRele = 0;
 unsigned long tempoUltimaVerificacaoFertil = 0;
 unsigned long tempoReinicio = 0;
-const unsigned long intervaloLeitura = 5000;      // 15 minutos (900000 ms)
+const unsigned long intervaloLeitura = 900000;      // 15 minutos (900000 ms)
 const unsigned long intervaloIrrigacao = 1000;      // 1 segundo para verificação da irrigação
-const unsigned long intervaloVerificacaoFertil = 10000; // 30 minutos (1800000 ms)
+const unsigned long intervaloVerificacaoFertil = 1800000; // 30 minutos (1800000 ms)
 const unsigned long intervaloReinicio = 2400000;    // 40 minutos (2400000 ms)
 
 // Dados de autenticação e conexão
@@ -53,9 +53,10 @@ void setup() {
     Serial.println("Conectando ao WiFi...");
     digitalWrite(PINO_LUZ, HIGH);
     delay(1000);
-    digitalWrite(PINO_LUZ, LOW);
+    
   }
   Serial.println("Conectado ao WiFi");
+  digitalWrite(PINO_LUZ, LOW);
 
   // Configurar os pinos
   pinMode(SENSOR_1_PIN, INPUT);
@@ -160,51 +161,76 @@ void controlarIrrigacao() {
 }
 
 void verificarFertil() {
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED) { // Verifica se está conectado ao Wi-Fi
     HTTPClient http;
+
+    // Configura o URL do servidor
     http.begin(serverFertilStateURL);
+
+    // Configura o cabeçalho de autenticação
     http.addHeader("Authorization", authKey);
-    
+
+    // Faz a requisição GET
     int httpResponseCode = http.GET();
+
     if (httpResponseCode == 200) {
       String response = http.getString();
-      // Verifica se a irrigação fértil deve ser iniciada
-      if (response.indexOf("\"start_fertil\":true") != -1) {
-        // Extrai o tempo de irrigação do JSON
-        int tempoIrrigacao = 0;
-        int timeStartIndex = response.indexOf("\"time_ferti_ms\":") + 17; // 17 é o comprimento do string `"time_ferti_ms":`
-        if (timeStartIndex != -1) {
-          int timeEndIndex = response.indexOf(",", timeStartIndex);
-          String timeString = response.substring(timeStartIndex, timeEndIndex);
-          tempoIrrigacao = timeString.toInt(); // Converte a string para int
-        }
+      Serial.println("Resposta do servidor: " + response); // Imprime a resposta completa
 
+      // Extrai os valores "start_fertil" e "time_ferti_ms"
+      int tempoIrrigacao = 0;
+      bool startFertil = false;
+
+      // Parse da resposta para "start_fertil"
+      int startPos = response.indexOf("\"start_fertil\":") + 15;
+      int endPos = response.indexOf(",", startPos);
+      String startFertilStr = response.substring(startPos, endPos);
+      startFertil = (startFertilStr == "true");
+
+      // Parse da resposta para "time_ferti_ms"
+      startPos = response.indexOf("\"time_ferti_ms\":") + 16;
+      endPos = response.indexOf("}", startPos);
+      String timeFertiMsStr = response.substring(startPos, endPos);
+      tempoIrrigacao = timeFertiMsStr.toInt();
+
+      // Mostra os resultados
+      Serial.println("start_fertil: " + String(startFertil ? "true" : "false"));
+      Serial.println("time_ferti_ms: " + String(tempoIrrigacao));
+
+      // Verifica se a irrigação fértil deve ser iniciada quando start_fertil é verdadeiro
+      if (startFertil && tempoIrrigacao > 0) {
         // Ligar o PINO_RELE um tempo antes da irrigação
-         // Tempo em milissegundos antes da irrigação
         digitalWrite(PINO_RELE, HIGH);
         enviarEstadoRele(true); // Envia true para o estado do relé antes da irrigação
         delay(tempoAntesPos); // Atraso antes de iniciar a irrigação
-        
+
         // Inicia a irrigação
         Serial.println("Iniciando irrigação da fértil...");
         enviarHistoricoFertil();
         digitalWrite(PINO_RELE_FERTIL, HIGH);
-        
+
         delay(tempoIrrigacao); // Espera durante a irrigação
-        
+        Serial.println("Tempo de irrigação: " + String(tempoIrrigacao) + " ms");
+
         // Desliga a irrigação
         digitalWrite(PINO_RELE_FERTIL, LOW);
-        
+
         // Desliga o PINO_RELE
         delay(tempoAntesPos); // Atraso após a irrigação
         digitalWrite(PINO_RELE, LOW);
         enviarEstadoRele(false); // Envia false para o estado do relé após a irrigação
         Serial.println("Irrigação da fértil finalizada.");
+      } else {
+        Serial.println("Irrigação da fértil não será iniciada.");
       }
     } else {
-      Serial.println("Falha ao verificar estado da fértil.");
+      Serial.println("Erro na requisição: " + String(httpResponseCode));
     }
+
+    // Libera o recurso HTTP
     http.end();
+  } else {
+    Serial.println("WiFi não está conectado.");
   }
 }
 
