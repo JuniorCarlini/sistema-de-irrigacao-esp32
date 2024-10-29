@@ -12,23 +12,22 @@
 // Inicializa o DHT
 DHT dht(DHT_PIN, DHT22);
 
-// Tempo de ativação da bomba de agua antes e depois da fertil
-int tempoAntesPos = 5000;  // 5 segundo
+// Parâmetros de tempo e calibração
+const int tempoAntesPos = 5000;    // Tempo antes e depois da irrigação fértil
+const int valorMinimo = 4050;      // Valor quando o solo está seco
+const int valorMaximo = 500;       // Valor quando o solo está muito úmido
 
-// Valores de calibração
-int valorMinimo = 4050;    // Valor quando o sensor está no ar (solo seco)
-int valorMaximo = 500;     // Valor quando o sensor está completamente na água (solo muito úmido)
-
-// Variáveis de tempo
+// Variáveis de tempo e configuração
 unsigned long tempoUltimaLeitura = 0;
 unsigned long tempoUltimaIrrigacao = 0;
 unsigned long tempoUltimaAtualizacaoRele = 0;
 unsigned long tempoUltimaVerificacaoFertil = 0;
 unsigned long tempoReinicio = 0;
-const unsigned long intervaloLeitura = 900000;      // 15 minutos (900000 ms)
-const unsigned long intervaloIrrigacao = 1000;      // 1 segundo para verificação da irrigação
-const unsigned long intervaloVerificacaoFertil = 1800000; // 30 minutos (1800000 ms)
-const unsigned long intervaloReinicio = 2400000;    // 40 minutos (2400000 ms)
+
+const unsigned long intervaloLeitura = 150000;          // Intervalo de leitura (10 segundos)
+const unsigned long intervaloIrrigacao = 1000;         // Intervalo de irrigação (1 segundo)
+const unsigned long intervaloVerificacaoFertil = 300000; // Intervalo de verificação da fértil (30 minutos)
+const unsigned long intervaloReinicio = 2400000;       // Intervalo de reinício (40 minutos)
 
 // Dados de autenticação e conexão
 const char* ssid = "----";
@@ -39,103 +38,88 @@ const String serverFertilStateURL = "http://----/data-fertil_state/";
 const String serverHistoricoURL = "http://----/historico-fertil/";
 const String authKey = "----"; // Key de autenticação
 
-// Variável para armazenar o estado do relé
 bool estadoRele = false;
 bool ultimoEstadoRele = false;  // Para verificar mudanças no estado do relé
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
 
-  // Conectar à rede WiFi
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
     Serial.println("Conectando ao WiFi...");
     digitalWrite(PINO_LUZ, HIGH);
     delay(1000);
-    
   }
   Serial.println("Conectado ao WiFi");
   digitalWrite(PINO_LUZ, LOW);
 
-  // Configurar os pinos
   pinMode(SENSOR_1_PIN, INPUT);
   pinMode(SENSOR_2_PIN, INPUT);
   pinMode(PINO_RELE, OUTPUT);
   pinMode(PINO_LUZ, OUTPUT);
   pinMode(PINO_RELE_FERTIL, OUTPUT);
 
-  // Inicializa o DHT
   dht.begin();
-
-  // Inicialmente, desliga o relé e a luz de erro
   digitalWrite(PINO_RELE, LOW);
   digitalWrite(PINO_LUZ, LOW);
   digitalWrite(PINO_RELE_FERTIL, LOW);
 
-  // Inicializa o tempo para reinício
   tempoReinicio = millis();
+  Serial.println("tempoReinicio");
+  Serial.println(tempoReinicio);
 }
 
 void loop() {
-  // Verifica se é hora de ler e enviar os dados (a cada 15 minutos)
-  if (millis() - tempoUltimaLeitura >= intervaloLeitura) {
-    tempoUltimaLeitura = millis();
+  unsigned long tempoAtual = millis();
+  Serial.println("tempoAtual");
+  Serial.println(tempoAtual);
+
+  if ((tempoAtual - tempoUltimaLeitura) >= intervaloLeitura) {
+    tempoUltimaLeitura = tempoAtual;
     lerDados();
   }
 
-  // Verifica e controla a irrigação
-  if (millis() - tempoUltimaIrrigacao >= intervaloIrrigacao) {
-    tempoUltimaIrrigacao = millis();
+  if ((tempoAtual - tempoUltimaIrrigacao) >= intervaloIrrigacao) {
     controlarIrrigacao();
   }
 
-  // Verifica a irrigação da fértil a cada 30 minutos
-  if (millis() - tempoUltimaVerificacaoFertil >= intervaloVerificacaoFertil) {
-    tempoUltimaVerificacaoFertil = millis();
+  if ((tempoAtual - tempoUltimaVerificacaoFertil) >= intervaloVerificacaoFertil) {
+    tempoUltimaVerificacaoFertil = tempoAtual;
     verificarFertil();
   }
 
-  // Verifica se o estado do relé mudou e envia a atualização
   if (estadoRele != ultimoEstadoRele) {
     ultimoEstadoRele = estadoRele;
     enviarEstadoRele(estadoRele);
   }
 
-  // Reinicia a ESP a cada 40 minutos para evitar travamentos
-  if (millis() - tempoReinicio >= intervaloReinicio) {
+  if (tempoAtual >= intervaloReinicio) {
     Serial.println("Reiniciando ESP para evitar travamentos...");
     ESP.restart();
   }
+
+  delay(1000); // Aguarda 1 segundo antes da próxima verificação
 }
 
 void lerDados() {
-  // Lê os valores dos sensores de umidade do solo
   int umidade1 = analogRead(SENSOR_1_PIN);
   int umidade2 = analogRead(SENSOR_2_PIN);
 
-  // Converte os valores lidos para uma porcentagem
   int umidadePercentual1 = map(umidade1, valorMaximo, valorMinimo, 100, 0);
   int umidadePercentual2 = map(umidade2, valorMaximo, valorMinimo, 100, 0);
 
-  // Limita os valores entre 0% e 100%
   umidadePercentual1 = constrain(umidadePercentual1, 0, 100);
   umidadePercentual2 = constrain(umidadePercentual2, 0, 100);
-
-  // Calcula a média
   int umidadeMedia = (umidadePercentual1 + umidadePercentual2) / 2;
 
-  // Lê a temperatura e umidade do ar
   float umidadeAr = dht.readHumidity();
   float temperaturaAr = dht.readTemperature();
 
-  // Verifica se a leitura falhou
   if (isnan(umidadeAr) || isnan(temperaturaAr)) {
     Serial.println("Falha na leitura do DHT!");
     return;
   }
 
-  // Enviar os dados via HTTP
   enviarDados(temperaturaAr, umidadeAr, umidadeMedia);
 }
 
@@ -145,18 +129,32 @@ void controlarIrrigacao() {
 
   int umidadePercentual1 = map(umidade1, valorMaximo, valorMinimo, 100, 0);
   int umidadePercentual2 = map(umidade2, valorMaximo, valorMinimo, 100, 0);
-
   int umidadeMedia = (umidadePercentual1 + umidadePercentual2) / 2;
 
-  // Controlar o estado do relé
-  if (umidadeMedia < 10) {
+  if (umidadeMedia < 60 && !estadoRele) {
+    tempoUltimaIrrigacao = millis();
     Serial.println("Iniciando irrigação...");
+    enviarEstadoRele(true); // Envia true para o estado do relé antes da irrigação
     digitalWrite(PINO_RELE, HIGH);
-    estadoRele = true; // Relé está ligado
-  } else if (umidadeMedia >= 20) {
+    estadoRele = true;
+
+    while (umidadeMedia < 85) {
+      umidade1 = analogRead(SENSOR_1_PIN);
+      umidade2 = analogRead(SENSOR_2_PIN);
+
+      umidadePercentual1 = map(umidade1, valorMaximo, valorMinimo, 100, 0);
+      umidadePercentual2 = map(umidade2, valorMaximo, valorMinimo, 100, 0);
+      umidadeMedia = (umidadePercentual1 + umidadePercentual2) / 2;
+
+      Serial.println("Aguardando para desligar irrigacao...");
+      Serial.println(umidadeMedia);
+      delay(1000);
+    }
+
     Serial.println("Desligando irrigação...");
     digitalWrite(PINO_RELE, LOW);
-    estadoRele = false; // Relé está desligado
+    enviarEstadoRele(false); // Envia false para o estado do relé antes da irrigação
+    estadoRele = false;
   }
 }
 
